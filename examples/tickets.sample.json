@@ -1,0 +1,9 @@
+[
+  {
+    "nullifier_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    "proof_b64": "",
+    "commitment_root_b64": null,
+    "extra": null,
+    "ticket_id": "sample-1"
+  }
+]
