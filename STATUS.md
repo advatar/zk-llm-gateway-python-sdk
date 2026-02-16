@@ -1,6 +1,6 @@
 # Status
 
-- [x] Ensure `.gitignore` is present and correct
-- [x] Run build
-- [x] Run tests
-- [x] Commit and push task files
+- [x] Disable automatic GitHub CI runs
+- [x] Keep reactivation path explicit and simple
+- [x] Validate the change locally
+- [ ] Commit and push
