@@ -4,6 +4,7 @@ import base64
 import json
 import os
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Dict, Tuple
 
 from cryptography.hazmat.primitives import hashes
@@ -69,10 +70,18 @@ class Envelope:
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "Envelope":
+        v = d.get("v", d.get("version"))
+        if v is None:
+            raise CryptoError("missing envelope version")
+
+        eph = d.get("eph_pubkey_b64", d.get("kem_pub_b64"))
+        if eph is None:
+            raise CryptoError("missing eph_pubkey_b64")
+
         return cls(
-            v=int(d["v"]),
-            token_class=TokenClass.parse(d["token_class"]),
-            eph_pubkey_b64=str(d["eph_pubkey_b64"]),
+            v=int(v),
+            token_class=TokenClass.parse(str(d["token_class"])),
+            eph_pubkey_b64=str(eph),
             nonce_b64=str(d["nonce_b64"]),
             ciphertext_b64=str(d["ciphertext_b64"]),
         )
@@ -82,22 +91,36 @@ class Envelope:
 class SealState:
     token_class: TokenClass
     eph_pubkey: bytes  # 32 bytes
-    key: bytes  # 32 bytes
+    req_key: bytes  # 32 bytes
+    resp_key: bytes  # 32 bytes
 
 
-def _aad(v: int, token_class: TokenClass, eph_pubkey: bytes) -> bytes:
-    # Must match Rust SDK for interoperability:
-    # [v] + token_class_str + b'|' + eph_pubkey
-    return bytes([v]) + token_class.value.encode("ascii") + b"|" + eph_pubkey
+class _KeyDirection(Enum):
+    REQUEST = 1
+    RESPONSE = 2
 
 
-def _derive_key(shared_secret: bytes, v: int, token_class: TokenClass) -> bytes:
-    info = f"zk-llm-gateway|v{v}|{token_class.value}".encode("ascii")
+def _aad(v: int, token_class: TokenClass, direction: _KeyDirection) -> bytes:
+    # Matches gateway/common: [version, token_class_id, direction]
+    return bytes([v & 0xFF, token_class.id_u8() & 0xFF, direction.value & 0xFF])
+
+
+def _hkdf_info(token_class: TokenClass, direction: _KeyDirection) -> bytes:
+    info = bytearray(b"zk-llm-gateway-envelope-v1")
+    if direction is _KeyDirection.REQUEST:
+        info.extend(b"/req")
+    else:
+        info.extend(b"/resp")
+    info.append(token_class.id_u8() & 0xFF)
+    return bytes(info)
+
+
+def _derive_key(shared_secret: bytes, token_class: TokenClass, direction: _KeyDirection) -> bytes:
     hkdf = HKDF(
         algorithm=hashes.SHA256(),
         length=32,
         salt=None,
-        info=info,
+        info=_hkdf_info(token_class, direction),
     )
     return hkdf.derive(shared_secret)
 
@@ -129,11 +152,12 @@ def seal_json(
         )
 
     shared = eph_sk.exchange(gateway_pk.as_public_key())
-    key = _derive_key(shared, v, token_class)
+    req_key = _derive_key(shared, token_class, _KeyDirection.REQUEST)
+    resp_key = _derive_key(shared, token_class, _KeyDirection.RESPONSE)
 
     nonce = os.urandom(12)
-    cipher = ChaCha20Poly1305(key)
-    a = _aad(v, token_class, eph_pub_bytes)
+    cipher = ChaCha20Poly1305(req_key)
+    a = _aad(v, token_class, _KeyDirection.REQUEST)
 
     try:
         ct = cipher.encrypt(nonce, padded, a)
@@ -147,7 +171,12 @@ def seal_json(
         nonce_b64=base64.b64encode(nonce).decode("ascii"),
         ciphertext_b64=base64.b64encode(ct).decode("ascii"),
     )
-    st = SealState(token_class=token_class, eph_pubkey=eph_pub_bytes, key=key)
+    st = SealState(
+        token_class=token_class,
+        eph_pubkey=eph_pub_bytes,
+        req_key=req_key,
+        resp_key=resp_key,
+    )
     return env, st
 
 
@@ -168,12 +197,12 @@ def open_json(env: Envelope, st: SealState) -> Any:
     if len(eph_pub) != 32 or len(nonce) != 12:
         raise CryptoError("invalid envelope fields")
 
-    # Expect gateway to echo the eph_pubkey from request.
+    # Gateway should echo the request ephemeral pubkey.
     if eph_pub != st.eph_pubkey:
         raise CryptoError("unexpected eph_pubkey in response")
 
-    cipher = ChaCha20Poly1305(st.key)
-    a = _aad(env.v, env.token_class, eph_pub)
+    cipher = ChaCha20Poly1305(st.resp_key)
+    a = _aad(env.v, env.token_class, _KeyDirection.RESPONSE)
 
     try:
         padded = cipher.decrypt(nonce, ct, a)

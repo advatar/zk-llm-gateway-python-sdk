@@ -4,11 +4,11 @@ This SDK implements the client-side envelope encryption + padding protocol used 
 the ZK LLM Gateway, along with ticket abstractions and a small OpenAI-style schema.
 
 High level:
-- Build a plaintext JSON payload: {token_class, ticket, upstream}
+- Build the gateway's canonical `InferenceRequest` payload
 - Pad to a fixed size for the token class
 - Encrypt into an Envelope using X25519 + HKDF + ChaCha20-Poly1305
 - POST envelope JSON to the gateway (/v1/infer)
-- Decrypt the response envelope and return the upstream JSON
+- Decrypt the response envelope and parse `GatewayEnvelopePayload`
 
 See README.md for usage and examples.
 """

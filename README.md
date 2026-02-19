@@ -14,7 +14,7 @@ while also reducing metadata leakage via fixed-size padding.
 ## Features
 
 - **Envelope encryption**: X25519 + HKDF-SHA256 + ChaCha20-Poly1305 (client → gateway)
-- **Token classes**: coarse buckets (`c512`, `c1024`, `c2048`, `c4096`) that map to fixed padded byte sizes
+- **Token classes**: coarse buckets (`c256`, `c512`, `c1024`, `c2048`, `c4096`) that map to fixed padded byte sizes
 - **ZK-ready tickets**: pluggable ticket source (`DummyTicketSource`, `FileTicketSource`, or your own)
 - **Optional redaction helpers**: redact obvious identifiers (emails, phone numbers, ETH addresses, API keys) before sending prompts
 
@@ -98,11 +98,10 @@ File format:
 ```json
 [
   {
-    "nullifier_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
-    "proof_b64": "",
-    "commitment_root_b64": null,
-    "extra": null,
-    "ticket_id": "sample-1"
+    "commitment_root": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    "nullifier": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+    "token_class": "c2048",
+    "proof": ""
   }
 ]
 ```
@@ -114,9 +113,18 @@ The SDK sends:
 1. A plaintext JSON payload:
    ```json
    {
+     "request_id": "6f0f8bc0-87de-4a8c-bad2-5f4f08c6c3d9",
+     "model": "gpt-4o-mini",
+     "messages": [{ "role": "user", "content": "hello" }],
+     "max_tokens": 256,
+     "temperature": 0.2,
      "token_class": "c2048",
-     "ticket": { ... },
-     "upstream": { ... }
+     "ticket": {
+       "commitment_root": "...",
+       "nullifier": "...",
+       "token_class": "c2048",
+       "proof": "..."
+     }
    }
    ```
 

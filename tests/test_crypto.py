@@ -1,24 +1,36 @@
 import base64
 import json
 import os
+from enum import Enum
 
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from zk_llm_gateway_sdk.crypto import Envelope, GatewayPublicKey, seal_json, open_json
+from zk_llm_gateway_sdk.crypto import Envelope, GatewayPublicKey, open_json, seal_json
 from zk_llm_gateway_sdk.padding import pad_payload, unpad_payload
 from zk_llm_gateway_sdk.token_class import TokenClass
 
 
-def _aad(v: int, token_class: TokenClass, eph_pubkey: bytes) -> bytes:
-    return bytes([v]) + token_class.value.encode("ascii") + b"|" + eph_pubkey
+class _Dir(Enum):
+    REQUEST = 1
+    RESPONSE = 2
 
 
-def _derive_key(shared_secret: bytes, v: int, token_class: TokenClass) -> bytes:
-    info = f"zk-llm-gateway|v{v}|{token_class.value}".encode("ascii")
-    hkdf = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=info)
+def _aad(v: int, token_class: TokenClass, direction: _Dir) -> bytes:
+    return bytes([v, token_class.id_u8(), direction.value])
+
+
+def _hkdf_info(token_class: TokenClass, direction: _Dir) -> bytes:
+    out = bytearray(b"zk-llm-gateway-envelope-v1")
+    out.extend(b"/req" if direction is _Dir.REQUEST else b"/resp")
+    out.append(token_class.id_u8())
+    return bytes(out)
+
+
+def _derive_key(shared_secret: bytes, token_class: TokenClass, direction: _Dir) -> bytes:
+    hkdf = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=_hkdf_info(token_class, direction))
     return hkdf.derive(shared_secret)
 
 
@@ -50,22 +62,24 @@ def test_encrypt_decrypt_roundtrip() -> None:
 
     eph_pk = X25519PublicKey.from_public_bytes(eph_pub)
     shared = gw_sk.exchange(eph_pk)
-    key = _derive_key(shared, env.v, token_class)
+    req_key = _derive_key(shared, token_class, _Dir.REQUEST)
+    resp_key = _derive_key(shared, token_class, _Dir.RESPONSE)
 
-    # Client and gateway must derive same key.
-    assert key == st.key
+    assert req_key == st.req_key
+    assert resp_key == st.resp_key
 
-    cipher = ChaCha20Poly1305(key)
-    padded = cipher.decrypt(nonce, ct, _aad(env.v, token_class, eph_pub))
+    req_cipher = ChaCha20Poly1305(req_key)
+    padded = req_cipher.decrypt(nonce, ct, _aad(env.v, token_class, _Dir.REQUEST))
     raw = unpad_payload(padded)
     assert json.loads(raw.decode("utf-8")) == payload
 
-    # Gateway side encrypt response with same key and eph_pubkey.
+    # Gateway side encrypt response with response-direction key/AAD.
     resp_payload = {"upstream": {"ok": True}}
     raw_resp = json.dumps(resp_payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     padded_resp = pad_payload(raw_resp, token_class.response_padded_len())
     nonce2 = os.urandom(12)
-    ct2 = cipher.encrypt(nonce2, padded_resp, _aad(env.v, token_class, eph_pub))
+    resp_cipher = ChaCha20Poly1305(resp_key)
+    ct2 = resp_cipher.encrypt(nonce2, padded_resp, _aad(env.v, token_class, _Dir.RESPONSE))
 
     resp_env = Envelope(
         v=env.v,

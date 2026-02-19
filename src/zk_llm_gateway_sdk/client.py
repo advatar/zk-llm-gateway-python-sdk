@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 from urllib.parse import urljoin
 
 import httpx
 
-from .crypto import Envelope, GatewayPublicKey, SealState, open_json, seal_json
+from .crypto import Envelope, GatewayPublicKey, open_json, seal_json
 from .errors import GatewayError, HttpError, ProtocolError
-from .openai_types import ChatCompletionsRequest, ChatCompletionsResponse
+from .openai_types import ChatCompletionsRequest, ChatCompletionsResponse, ChatMessage
 from .tickets import TicketSource, ZkTicket
 from .token_class import TokenClass
 
@@ -23,7 +24,6 @@ class GatewayClientConfig:
     headers: Dict[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        # Sensible defaults (can be overridden).
         self.headers.setdefault("accept", "application/json")
         self.headers.setdefault("content-type", "application/json")
         self.headers.setdefault("user-agent", "zk-llm-gateway-python-sdk/0.1")
@@ -39,8 +39,44 @@ def _join_url(base: str, path: str) -> str:
     return urljoin(b, p)
 
 
+def _parse_chat_request(upstream: Any) -> ChatCompletionsRequest:
+    if isinstance(upstream, ChatCompletionsRequest):
+        return upstream
+
+    if isinstance(upstream, dict) and "model" in upstream and "messages" in upstream:
+        try:
+            return ChatCompletionsRequest(
+                model=str(upstream["model"]),
+                messages=[
+                    ChatMessage.from_dict(m)
+                    for m in list(upstream.get("messages") or [])
+                    if isinstance(m, dict)
+                ],
+                temperature=upstream.get("temperature"),
+                max_tokens=upstream.get("max_tokens"),
+                stream=upstream.get("stream"),
+                extra={
+                    k: v
+                    for k, v in upstream.items()
+                    if k not in {"model", "messages", "temperature", "max_tokens", "stream"}
+                },
+            )
+        except Exception as e:  # noqa: BLE001
+            raise ProtocolError(f"invalid chat request payload: {e}") from e
+
+    if isinstance(upstream, dict) and upstream.get("path") == "/v1/chat/completions":
+        body = upstream.get("body")
+        if not isinstance(body, dict):
+            raise ProtocolError("missing or invalid 'body' in upstream wrapper")
+        return _parse_chat_request(body)
+
+    raise ProtocolError(
+        "unsupported infer_json payload; expected chat request body or {path:'/v1/chat/completions', body:{...}}"
+    )
+
+
 class GatewayClient:
-    """Async client for the encrypted /v1/infer endpoint."""
+    """Async client for encrypted `/v1/infer` using canonical InferenceRequest."""
 
     def __init__(
         self,
@@ -58,7 +94,10 @@ class GatewayClient:
         self.infer_url = _join_url(endpoint, self.config.infer_path)
 
         self._owns_http = http is None
-        self.http = http or httpx.AsyncClient(timeout=self.config.timeout_seconds, headers=self.config.headers)
+        self.http = http or httpx.AsyncClient(
+            timeout=self.config.timeout_seconds,
+            headers=self.config.headers,
+        )
 
     async def aclose(self) -> None:
         if self._owns_http:
@@ -74,10 +113,19 @@ class GatewayClient:
         ticket: ZkTicket,
         upstream: Any,
     ) -> Any:
+        if ticket.token_class != token_class:
+            raise ProtocolError("ticket token_class must match requested token_class")
+
+        chat_req = _parse_chat_request(upstream)
+
         payload = {
+            "request_id": str(uuid.uuid4()),
+            "model": chat_req.model,
+            "messages": [m.to_dict() for m in chat_req.messages],
+            "max_tokens": chat_req.max_tokens,
+            "temperature": chat_req.temperature,
             "token_class": token_class.value,
             "ticket": ticket.to_dict(),
-            "upstream": upstream,
         }
 
         env, st = seal_json(self.gateway_pk, token_class, payload)
@@ -97,21 +145,36 @@ class GatewayClient:
 
         decrypted = open_json(resp_env, st)
 
-        # Encrypted error payload (preferred)
+        # Canonical gateway payload.
+        if isinstance(decrypted, dict) and decrypted.get("kind") in {"ok", "err"}:
+            kind = str(decrypted.get("kind"))
+            if kind == "ok":
+                response = decrypted.get("response")
+                if not isinstance(response, dict):
+                    raise ProtocolError("missing 'response' field in gateway payload")
+                return response
+
+            err = decrypted.get("error")
+            if not isinstance(err, dict):
+                raise GatewayError(code="gateway_error", message="unknown error")
+            code = str(err.get("code") or "gateway_error")
+            msg = str(err.get("message") or "unknown error")
+            raise GatewayError(code=code, message=msg)
+
+        # Legacy SDK payload shape fallback.
         if isinstance(decrypted, dict) and "error" in decrypted:
             err = decrypted.get("error") or {}
             code = str(err.get("code") or "gateway_error")
             msg = str(err.get("message") or "unknown error")
             raise GatewayError(code=code, message=msg)
 
-        # For non-2xx, allow encrypted errors above; otherwise raise.
         if status < 200 or status >= 300:
             raise HttpError(status_code=status, message=f"gateway returned HTTP {status}")
 
-        if not isinstance(decrypted, dict) or "upstream" not in decrypted:
-            raise ProtocolError("missing 'upstream' field in decrypted gateway response")
+        if isinstance(decrypted, dict) and "upstream" in decrypted:
+            return decrypted["upstream"]
 
-        return decrypted["upstream"]
+        raise ProtocolError("missing response payload in decrypted gateway response")
 
     async def chat_completions(
         self,
@@ -121,19 +184,26 @@ class GatewayClient:
         if req.max_tokens is None:
             req.max_tokens = token_class.max_output_tokens_hint()
 
-        upstream = {
-            "path": "/v1/chat/completions",
-            "method": "POST",
-            "body": req.to_dict(),
-        }
+        resp_json = await self.infer_json(token_class, req.to_dict())
 
-        resp_json = await self.infer_json(token_class, upstream)
+        # Canonical gateway response.
+        if isinstance(resp_json, dict) and "output" in resp_json and "request_id" in resp_json:
+            data = {
+                "id": str(resp_json.get("request_id")),
+                "model": str(resp_json.get("model") or req.model),
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": str(resp_json.get("output") or "")},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "billed_token_class": resp_json.get("billed_token_class"),
+            }
+            return ChatCompletionsResponse.from_dict(data)
 
-        # Gateways may wrap upstream responses as { "body": <openai_json>, ... }.
-        if isinstance(resp_json, dict) and "body" in resp_json:
-            body = resp_json.get("body")
-        else:
-            body = resp_json
+        # Backward-compatible parsing for SDK-proxy response.
+        body = resp_json.get("body") if isinstance(resp_json, dict) and "body" in resp_json else resp_json
 
         if not isinstance(body, dict):
             raise ProtocolError("unexpected upstream response type")
@@ -142,7 +212,7 @@ class GatewayClient:
 
 
 class GatewaySyncClient:
-    """Sync client for the encrypted /v1/infer endpoint."""
+    """Sync client for encrypted `/v1/infer` using canonical InferenceRequest."""
 
     def __init__(
         self,
@@ -160,7 +230,10 @@ class GatewaySyncClient:
         self.infer_url = _join_url(endpoint, self.config.infer_path)
 
         self._owns_http = http is None
-        self.http = http or httpx.Client(timeout=self.config.timeout_seconds, headers=self.config.headers)
+        self.http = http or httpx.Client(
+            timeout=self.config.timeout_seconds,
+            headers=self.config.headers,
+        )
 
     def close(self) -> None:
         if self._owns_http:
@@ -176,10 +249,19 @@ class GatewaySyncClient:
         ticket: ZkTicket,
         upstream: Any,
     ) -> Any:
+        if ticket.token_class != token_class:
+            raise ProtocolError("ticket token_class must match requested token_class")
+
+        chat_req = _parse_chat_request(upstream)
+
         payload = {
+            "request_id": str(uuid.uuid4()),
+            "model": chat_req.model,
+            "messages": [m.to_dict() for m in chat_req.messages],
+            "max_tokens": chat_req.max_tokens,
+            "temperature": chat_req.temperature,
             "token_class": token_class.value,
             "ticket": ticket.to_dict(),
-            "upstream": upstream,
         }
 
         env, st = seal_json(self.gateway_pk, token_class, payload)
@@ -199,6 +281,21 @@ class GatewaySyncClient:
 
         decrypted = open_json(resp_env, st)
 
+        if isinstance(decrypted, dict) and decrypted.get("kind") in {"ok", "err"}:
+            kind = str(decrypted.get("kind"))
+            if kind == "ok":
+                response = decrypted.get("response")
+                if not isinstance(response, dict):
+                    raise ProtocolError("missing 'response' field in gateway payload")
+                return response
+
+            err = decrypted.get("error")
+            if not isinstance(err, dict):
+                raise GatewayError(code="gateway_error", message="unknown error")
+            code = str(err.get("code") or "gateway_error")
+            msg = str(err.get("message") or "unknown error")
+            raise GatewayError(code=code, message=msg)
+
         if isinstance(decrypted, dict) and "error" in decrypted:
             err = decrypted.get("error") or {}
             code = str(err.get("code") or "gateway_error")
@@ -208,10 +305,10 @@ class GatewaySyncClient:
         if status < 200 or status >= 300:
             raise HttpError(status_code=status, message=f"gateway returned HTTP {status}")
 
-        if not isinstance(decrypted, dict) or "upstream" not in decrypted:
-            raise ProtocolError("missing 'upstream' field in decrypted gateway response")
+        if isinstance(decrypted, dict) and "upstream" in decrypted:
+            return decrypted["upstream"]
 
-        return decrypted["upstream"]
+        raise ProtocolError("missing response payload in decrypted gateway response")
 
     def chat_completions(
         self,
@@ -221,18 +318,24 @@ class GatewaySyncClient:
         if req.max_tokens is None:
             req.max_tokens = token_class.max_output_tokens_hint()
 
-        upstream = {
-            "path": "/v1/chat/completions",
-            "method": "POST",
-            "body": req.to_dict(),
-        }
+        resp_json = self.infer_json(token_class, req.to_dict())
 
-        resp_json = self.infer_json(token_class, upstream)
+        if isinstance(resp_json, dict) and "output" in resp_json and "request_id" in resp_json:
+            data = {
+                "id": str(resp_json.get("request_id")),
+                "model": str(resp_json.get("model") or req.model),
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": str(resp_json.get("output") or "")},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "billed_token_class": resp_json.get("billed_token_class"),
+            }
+            return ChatCompletionsResponse.from_dict(data)
 
-        if isinstance(resp_json, dict) and "body" in resp_json:
-            body = resp_json.get("body")
-        else:
-            body = resp_json
+        body = resp_json.get("body") if isinstance(resp_json, dict) and "body" in resp_json else resp_json
 
         if not isinstance(body, dict):
             raise ProtocolError("unexpected upstream response type")
