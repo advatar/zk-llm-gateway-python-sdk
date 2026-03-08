@@ -75,6 +75,21 @@ def _parse_chat_request(upstream: Any) -> ChatCompletionsRequest:
     )
 
 
+def _build_inference_request(
+    token_class: TokenClass,
+    ticket: ZkTicket,
+    chat_req: ChatCompletionsRequest,
+) -> Dict[str, Any]:
+    if chat_req.stream is True:
+        raise ProtocolError("stream=true is not supported on /v1/infer")
+
+    payload = chat_req.to_dict()
+    payload["request_id"] = str(uuid.uuid4())
+    payload["token_class"] = token_class.value
+    payload["ticket"] = ticket.to_dict()
+    return payload
+
+
 class GatewayClient:
     """Async client for encrypted `/v1/infer` using canonical InferenceRequest."""
 
@@ -118,15 +133,7 @@ class GatewayClient:
 
         chat_req = _parse_chat_request(upstream)
 
-        payload = {
-            "request_id": str(uuid.uuid4()),
-            "model": chat_req.model,
-            "messages": [m.to_dict() for m in chat_req.messages],
-            "max_tokens": chat_req.max_tokens,
-            "temperature": chat_req.temperature,
-            "token_class": token_class.value,
-            "ticket": ticket.to_dict(),
-        }
+        payload = _build_inference_request(token_class, ticket, chat_req)
 
         env, st = seal_json(self.gateway_pk, token_class, payload)
 
@@ -188,6 +195,15 @@ class GatewayClient:
 
         # Canonical gateway response.
         if isinstance(resp_json, dict) and "output" in resp_json and "request_id" in resp_json:
+            upstream = resp_json.get("upstream")
+            if isinstance(upstream, dict):
+                body = upstream.get("body") if isinstance(upstream.get("body"), dict) else upstream
+                response = ChatCompletionsResponse.from_dict(body)
+                response.extra["billed_token_class"] = resp_json.get("billed_token_class")
+                response.id = response.id or str(resp_json.get("request_id"))
+                response.model = response.model or str(resp_json.get("model") or req.model)
+                return response
+
             data = {
                 "id": str(resp_json.get("request_id")),
                 "model": str(resp_json.get("model") or req.model),
@@ -254,15 +270,7 @@ class GatewaySyncClient:
 
         chat_req = _parse_chat_request(upstream)
 
-        payload = {
-            "request_id": str(uuid.uuid4()),
-            "model": chat_req.model,
-            "messages": [m.to_dict() for m in chat_req.messages],
-            "max_tokens": chat_req.max_tokens,
-            "temperature": chat_req.temperature,
-            "token_class": token_class.value,
-            "ticket": ticket.to_dict(),
-        }
+        payload = _build_inference_request(token_class, ticket, chat_req)
 
         env, st = seal_json(self.gateway_pk, token_class, payload)
 
@@ -321,6 +329,15 @@ class GatewaySyncClient:
         resp_json = self.infer_json(token_class, req.to_dict())
 
         if isinstance(resp_json, dict) and "output" in resp_json and "request_id" in resp_json:
+            upstream = resp_json.get("upstream")
+            if isinstance(upstream, dict):
+                body = upstream.get("body") if isinstance(upstream.get("body"), dict) else upstream
+                response = ChatCompletionsResponse.from_dict(body)
+                response.extra["billed_token_class"] = resp_json.get("billed_token_class")
+                response.id = response.id or str(resp_json.get("request_id"))
+                response.model = response.model or str(resp_json.get("model") or req.model)
+                return response
+
             data = {
                 "id": str(resp_json.get("request_id")),
                 "model": str(resp_json.get("model") or req.model),

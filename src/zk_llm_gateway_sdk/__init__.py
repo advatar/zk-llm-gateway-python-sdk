@@ -22,6 +22,15 @@ from .errors import (
     InvalidTokenClass,
     InvalidGatewayPublicKey,
 )
+from .integration import (
+    AppChatRequest,
+    AppGateway,
+    AppGatewayConfig,
+    AppGatewaySync,
+    GATEWAY_INFER_PATH,
+    RELAY_INFER_PATH,
+    TicketSourceConfig,
+)
 from .openai_types import (
     ChatMessage,
     ChatCompletionsRequest,
@@ -42,6 +51,13 @@ __all__ = [
     "GatewayClientConfig",
     "GatewayPublicKey",
     "Envelope",
+    "AppGateway",
+    "AppGatewaySync",
+    "AppGatewayConfig",
+    "AppChatRequest",
+    "TicketSourceConfig",
+    "GATEWAY_INFER_PATH",
+    "RELAY_INFER_PATH",
     "TokenClass",
     "ZkTicket",
     "TicketSource",

@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 class ChatMessage:
     role: str
     content: str
+    extra: Dict[str, Any] = field(default_factory=dict)
 
     @staticmethod
     def system(content: str) -> "ChatMessage":
@@ -22,11 +23,20 @@ class ChatMessage:
         return ChatMessage(role="assistant", content=content)
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"role": self.role, "content": self.content}
+        out = {"role": self.role, "content": self.content}
+        out.update(self.extra)
+        return out
 
     @classmethod
     def from_dict(cls, d: Dict[str, Any]) -> "ChatMessage":
-        return cls(role=str(d["role"]), content=str(d["content"]))
+        extra = dict(d)
+        role = str(extra.pop("role"))
+        content = extra.pop("content", "")
+        return cls(
+            role=role,
+            content="" if content is None else str(content),
+            extra=extra,
+        )
 
 
 @dataclass
@@ -39,6 +49,7 @@ class ChatCompletionsRequest:
     stream: Optional[bool] = None
 
     # Extra parameters forwarded to the upstream provider.
+    # `stream=True` is rejected on `/v1/infer`, which remains non-streaming today.
     extra: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:

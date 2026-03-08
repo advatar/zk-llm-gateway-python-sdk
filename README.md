@@ -77,6 +77,47 @@ async def main() -> None:
 asyncio.run(main())
 ```
 
+## Drop-in app wrapper
+
+If your Python app wants an env-driven integration layer instead of wiring
+`GatewayClient` manually, use `AppGatewayConfig`.
+
+Environment variables:
+
+- `GATEWAY_BASE_URL` or `GATEWAY_URL` - base URL for the gateway or relay host
+- `GATEWAY_PUBLIC_KEY_B64` - base64 X25519 gateway public key
+- `GATEWAY_TICKETS_JSON` or `TICKETS_JSON` - JSON file containing pre-issued tickets
+- `GATEWAY_USE_DUMMY_TICKETS=true` - development-only fallback
+- `GATEWAY_INFER_PATH=/relay` or `GATEWAY_USE_RELAY=true` - send ciphertext through the relay
+- `GATEWAY_MODEL` or `MODEL` - default model name, defaults to `gpt-4o-mini`
+- `GATEWAY_TOKEN_CLASS` or `TOKEN_CLASS` - defaults to `c2048`
+- `GATEWAY_TEMPERATURE` - optional default temperature
+- `GATEWAY_TIMEOUT_SECS` - optional request timeout, defaults to `60`
+- `GATEWAY_AUTH_BEARER` - optional bearer token
+
+```python
+import asyncio
+
+from zk_llm_gateway_sdk import AppGatewayConfig
+
+
+async def main() -> None:
+    gateway = AppGatewayConfig.from_env().build()
+    try:
+        answer = await gateway.ask_with_system(
+            "You are a helpful assistant.",
+            "Summarize our privacy model.",
+        )
+        print(answer)
+    finally:
+        await gateway.aclose()
+
+
+asyncio.run(main())
+```
+
+For a complete executable example, see `examples/app_gateway.py`.
+
 ## Ticket sources
 
 ### Dummy tickets (dev only)
@@ -161,6 +202,7 @@ restored = redactor.rehydrate_text(res.redacted, res.map)
 See the `examples/` directory:
 
 - `basic_chat.py`
+- `app_gateway.py`
 - `ticket_file.py`
 - `redaction.py`
 
