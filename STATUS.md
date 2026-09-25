@@ -1,5 +1,13 @@
 # Status
 
+## KCF-SDK-P continuation — 2026-09-25
+
+- Implemented pre-issuance rejection of reserved provider budgets/credentials, multiple completions and explicit provider storage.
+- Fixed borrowed HTTPX transport lifetime across per-request clients; cookie isolation preserved.
+- 79 focused tests pass locally, including the original 60.
+- Native Rust conformance remains BLOCKED (zero native cases); full current-main suite, Ruff and Python-version matrix are not run.
+- Both new APIs remain opt-in; legacy v1 migration and all remaining issue #1 work stay open. No release, main/pin change, CI dispatch or deployment.
+
 - [x] Add a high-level app integration helper mirroring the Rust SDK wrapper
 - [x] Document env-driven app setup and relay support in the README
 - [x] Add an executable example and targeted tests

@@ -110,3 +110,28 @@ python3 -m pytest -q tests/test_prepared.py
 Follow-up: run the native gateway bridge against these exact SDK files, broaden
 canonical numeric support only with shared vectors, migrate legacy high-level APIs
 explicitly, and qualify the other three SDKs. Issue #1 remains open.
+
+## Continuation — 25 September 2026
+
+Provider budget aliases `max_completion_tokens`/`max_output_tokens`, embedded
+`api_key`/`authorization`, `n` other than integer 1, and `store` other than boolean
+false are now rejected during preparation, before an issuer callback runs. These
+match the proposed gateway admission policy; they do not prove provider retention
+settings or data-release authority.
+
+An injected HTTPX transport is **borrowed**. A fresh client is still used for each
+request (no cookie carry-over), but client cleanup does not close the caller-owned
+transport. The caller must close/aclose it when no longer needed. This supports
+host-controlled transport lifetime; it does not by itself implement Kline's Gate.
+
+Verification: `python3 -m pytest -q tests/test_prepared.py tests/test_prepared_policy.py`
+returned **79 passed** in the local Python 3.13 environment. The original 60 tests
+were rerun. The new suite covers policy refusal before issuance and two successive
+requests through sync/async caller-owned transports, without cookie persistence.
+The new module baseline blob hashes were checked against PR #2. Legacy imports
+still came from the attached snapshot; a full current-main package regression,
+Ruff, Python-version matrix and native Rust conformance remain unrun. The native
+runner still reports Cargo unavailable, zero cases and qualified=false.
+
+No legacy API migration, payment issuance/finality, attestation verifier, hospital
+state store or deployed service is included. Keep the PR draft.

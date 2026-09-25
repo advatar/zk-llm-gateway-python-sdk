@@ -25,6 +25,9 @@ CLASSES = {
 }
 RESERVED = {"request_id", "token_class", "ticket", "provider_options"}
 CORE = {"model", "messages", "max_tokens", "temperature", "stream"}
+# The gateway owns output budgets and credential handling. Fail before issuance
+# for these aliases rather than discovering the mismatch after buying a ticket.
+FORBIDDEN_OPTIONS = {"max_completion_tokens", "max_output_tokens", "api_key", "authorization"}
 
 
 class PreparedError(ValueError):
@@ -135,6 +138,12 @@ class PreparedInference:
             normalized.append(item)
         options = {k: v for k, v in request.items() if k not in CORE}
         _check_json(options)
+        if FORBIDDEN_OPTIONS.intersection(options):
+            raise PreparedError("reserved_provider_option")
+        if "n" in options and (type(options["n"]) is not int or options["n"] != 1):
+            raise PreparedError("multiple_completions_unsupported")
+        if "store" in options and options["store"] is not False:
+            raise PreparedError("provider_storage_unsupported")
         maximum = request.get("max_tokens")
         if maximum is not None and (type(maximum) is not int or not 0 <= maximum <= 2**32-1):
             raise PreparedError("invalid_max_tokens")

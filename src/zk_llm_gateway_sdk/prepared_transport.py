@@ -181,6 +181,31 @@ def _check_headers(response: httpx.Response, limit: int) -> None:
             raise PreparedError("response_too_large", "dispatched_unknown") from None
 
 
+class _BorrowedSyncTransport(httpx.BaseTransport):
+    """A caller-owned transport must survive per-request client cleanup."""
+
+    def __init__(self, transport: httpx.BaseTransport):
+        self._transport = transport
+
+    def handle_request(self, request: httpx.Request) -> httpx.Response:
+        return self._transport.handle_request(request)
+
+    def close(self) -> None:
+        # The caller owns lifecycle and any resource or destination policy.
+        pass
+
+
+class _BorrowedAsyncTransport(httpx.AsyncBaseTransport):
+    def __init__(self, transport: httpx.AsyncBaseTransport):
+        self._transport = transport
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        return await self._transport.handle_async_request(request)
+
+    async def aclose(self) -> None:
+        pass
+
+
 class PreparedSyncClient:
     def __init__(self, endpoint: PreparedEndpoint, *, transport: httpx.BaseTransport | None = None):
         self._endpoint = endpoint
@@ -191,7 +216,9 @@ class PreparedSyncClient:
         limit = _response_limit(ctx)
         try:
             # A fresh client prevents response cookies from linking later calls.
-            with httpx.Client(transport=self._transport, trust_env=False, follow_redirects=False,
+            with httpx.Client(transport=(_BorrowedSyncTransport(self._transport)
+                                         if self._transport is not None else None),
+                              trust_env=False, follow_redirects=False,
                               timeout=self._endpoint.timeout_seconds) as client:
                 with client.stream("POST", self._endpoint.url, json=env,
                                    headers={"accept": "application/json", "accept-encoding": "identity"}) as response:
@@ -217,7 +244,9 @@ class PreparedClient:
         env, ctx = seal_request(authorization, self._endpoint.public_key)
         limit = _response_limit(ctx)
         async def exchange() -> bytes:
-            async with httpx.AsyncClient(transport=self._transport, trust_env=False,
+            async with httpx.AsyncClient(transport=(_BorrowedAsyncTransport(self._transport)
+                                                    if self._transport is not None else None),
+                                         trust_env=False,
                                          follow_redirects=False,
                                          timeout=self._endpoint.timeout_seconds) as client:
                 async with client.stream("POST", self._endpoint.url, json=env,
