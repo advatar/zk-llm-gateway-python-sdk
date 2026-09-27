@@ -2,7 +2,6 @@
 import asyncio
 import base64
 import copy
-import json
 
 import httpx
 import pytest
