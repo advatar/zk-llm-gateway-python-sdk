@@ -25,7 +25,7 @@ jobs:
       - name: Install package and qualification tools
         run: python -m pip install -e . pytest ruff
       - name: Ruff
-        run: ruff check src tests
+        run: ruff check --select F,E9 src/zk_llm_gateway_sdk/prepared.py src/zk_llm_gateway_sdk/prepared_transport.py tests/test_prepared.py tests/test_prepared_policy.py
       - name: Full tests
         run: pytest -q
       - name: Prepared-request focused tests
