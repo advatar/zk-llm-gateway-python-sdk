@@ -21,7 +21,7 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from .prepared import (AuthorizedInference, CLASSES, PreparedError, decode_b64,
-                       decode_json, encode_json)
+                       decode_json)
 
 
 def _b64(raw: bytes) -> str:
